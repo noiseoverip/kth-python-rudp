@@ -15,9 +15,9 @@ from Logging import Level
 rudpSockets = []
 logger = Logger("RUDP", Level.TRACE)
 
-def createSocket(port):
+def createSocket(addr, port):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", port))
+    sock.bind((addr, port))
     rudpSocket = RudpSocket(sock)
     rudpSocket.addr_src = sock.getsockname()
     rudpSockets.append(rudpSocket)
@@ -71,10 +71,10 @@ class RudpSocket:
     STATE_INITING = 3
     STATE_ESTABLISHED = 4
     PARAM_MAX_DATA_LENGH = 1000
-    PARAM_TIMEOUT = 50 # in milliseconds
+    PARAM_TIMEOUT = 500 # in milliseconds
     PARAM_WINDOWS_SIZE_MAX = 3  
     PARAM_RETIRES_MAX = 150
-    FAKE_LOSS = 1 # In scale 1-10, where 10 = 100% loss
+    FAKE_LOSS = 5 # In scale 1-10, where 10 = 100% loss
     packetloss = 0
     packetsSentData = 0
     packetsSentControl = 0
@@ -150,7 +150,7 @@ class RudpSocket:
             return False
         self.socket.sendto(rudpPacket.pack(), address)
         logger.log(Level.TRACE, "")
-        logger.log(Level.TRACE, ">>" + str(rudpPacket))
+        logger.log(Level.TRACE, ">>" + str(address) + str(rudpPacket))
         self.registerControlPacketSent()
         return True
     
@@ -174,6 +174,9 @@ class RudpSocket:
             self.senders.append(sender)
             return sender
         return None
+    
+    def _cleanUpSender(self, sender):
+        self.senders.remove(sender)
             
     def receive(self):
         #print "Reading from rudpSocket"
@@ -206,6 +209,13 @@ class RudpSocket:
                 sender.state = RudpSocket.STATE_ESTABLISHED
             else:
                 logger.log(Level.ERROR, "Received unexpected packet " + str(self))
+                ''' This might happen if sender didn't receive our ACK, so we can simply resend ACK,'''
+                ''' But only if no DATA packets have been received'''
+                if (sender.nextReceivingSequenceNumber == 0):
+                    packet = RudpPacket()
+                    packet.type = RudpPacket.TYPE_ACK
+                    packet.seqnum = rudpPacket.seqnum + 1
+                    self.sendPacketControl(addr, packet)
                 self.registerPacketReceivedIgnored()
                 
         elif rudpPacket.type == RudpPacket.TYPE_DATA:
@@ -213,9 +223,9 @@ class RudpSocket:
             ''' Receiving side only'''
             if sender.state == RudpSocket.STATE_ESTABLISHED:
                 logger.log(Level.DEBUG,str(self) + " received DATA")
-                if sender.nextSequenceNumber != rudpPacket.seqnum:
-                    logger.log(Level.ERROR, "Packets out of order, was expecting:" + str(sender.nextSequenceNumber))
-                    if rudpPacket.seqnum <= sender.nextSequenceNumber:
+                if sender.nextReceivingSequenceNumber != rudpPacket.seqnum:
+                    logger.log(Level.ERROR, "Packets out of order, was expecting:" + str(sender.nextReceivingSequenceNumber))
+                    if rudpPacket.seqnum <= sender.nextReceivingSequenceNumber:
                         ''' We already got this packet, so we simply ACK it '''
                         logger.log(Level.INFO, "Duplicated packet, sending ACK")
                         packet = RudpPacket()
@@ -226,9 +236,9 @@ class RudpSocket:
                     return
                 
                 self.receiveHandler(self, addr, rudpPacket.data)
-                sender.nextSequenceNumber = rudpPacket.seqnum + 1
+                sender.nextReceivingSequenceNumber = rudpPacket.seqnum + 1
                 packet = RudpPacket()
-                packet.seqnum = sender.nextSequenceNumber
+                packet.seqnum = sender.nextReceivingSequenceNumber
                 packet.type = RudpPacket.TYPE_ACK
                 self.sendPacketControl(addr, packet)
             else:
@@ -243,12 +253,13 @@ class RudpSocket:
        
         elif rudpPacket.type == RudpPacket.TYPE_FIN:
             if sender.state == RudpSocket.STATE_ESTABLISHED or sender.state == RudpSocket.STATE_CLOSED:
-                if rudpPacket.seqnum == sender.nextSequenceNumber:
+                if rudpPacket.seqnum == sender.nextReceivingSequenceNumber:
                     logger.log(Level.DEBUG, "Received FIN, sending ACK and closing socket")
                     packet = RudpPacket()
-                    packet.seqnum = sender.nextSequenceNumber + 1
+                    packet.seqnum = sender.nextReceivingSequenceNumber + 1
                     packet.type = RudpPacket.TYPE_ACK
                     self.sendPacketControl(addr, packet)                    
+                    sender.finished = True
                     sender.state = RudpSocket.STATE_CLOSED
                 else:
                     logger.log(Level.ERROR, "FIN packet wrong seq")
@@ -262,16 +273,17 @@ class RudpSocket:
     def generateSynPacket(self):       
         packet = RudpPacket()
         packet.type = RudpPacket.TYPE_SYN
-        packet.seqnum = randint(100,1000)
+        packet.seqnum = randint(100,100000)
         return packet
         
 
 class RudpSocketPeer:
     ''' Class for holding related socket information for each of the peers'''
     def __init__(self, address):
-        self.nextSequenceNumber = 0
-        self.nextPacketIndex = 0
-        self.seqNumberAckNext = 1
+        self.nextReceivingSequenceNumber = 0    # Next sequence number of packet to add to buffer
+        self.nextBufferPacketSeqNumber = 0      # Next sequence number to user when putting packets into buffer
+        self.nextSendingPacketSeqNumber = 0      # Next sequence number of packet when sending from buffer
+        self.nextAckSeqNumber = 1               # Next expected sequence number of an ACK
         self.addr = address
         self.state = RudpSocket.STATE_LISTEN #Should be socket scope only
         self.window = 3
@@ -287,7 +299,7 @@ class RudpSocketPeer:
         if self.state == RudpSocket.STATE_LISTEN:
             print str(self) + " not ESTABLISHED, sending SYN"
             packet = self.rudpSocket.generateSynPacket()
-            self.seqNumberAckNext = packet.seqnum  + 1
+            self.nextAckSeqNumber = packet.seqnum  + 1
             self.rudpSocket.sendPacketControl(self.addr, packet)
             self.state = RudpSocket.STATE_INITING
             Event.eventTimeout(RudpSocket.PARAM_TIMEOUT, self.__handleTimeoutSYN, packet.seqnum, "SYN timeout")
@@ -302,9 +314,9 @@ class RudpSocketPeer:
         packet = RudpPacket()
         packet.type = RudpPacket.TYPE_DATA
         packet.data = data
-        packet.seqnum = self.nextSequenceNumber        
+        packet.seqnum = self.nextBufferPacketSeqNumber        
         self.dataBuffer.append(packet)
-        self.nextSequenceNumber = self.nextSequenceNumber + 1
+        self.nextBufferPacketSeqNumber = self.nextBufferPacketSeqNumber + 1
         logger.log(Level.TRACE, "Buffer has packets:" + str(len(self.dataBuffer)))
         return True
     def __handleTimeoutSYN(self, packetSequenceNumber):
@@ -312,7 +324,7 @@ class RudpSocketPeer:
         Event.eventTimeoutDelete(self.__handleTimeoutSYN, packetSequenceNumber)
         if self.__incrementRetries():
             packet = self.rudpSocket.generateSynPacket()
-            self.seqNumberAckNext = packet.seqnum + 1
+            self.nextAckSeqNumber = packet.seqnum + 1
             logger.log(Level.INFO, "Retransmitting SYN")
             self.rudpSocket.sendPacketControl(self.addr, packet)
             Event.eventTimeout(RudpSocket.PARAM_TIMEOUT, self.__handleTimeoutSYN, packet.seqnum, "SYN timeout")
@@ -328,12 +340,12 @@ class RudpSocketPeer:
     def __handleTimeoutData(self, rudpSecNum):
         logger.log(Level.DEBUG, "Handling packet timeout DATA packet seq:" + str(rudpSecNum))
         ''' Here we need to remove all other DATA packet timeouts'''
-        for seq in range(rudpSecNum, self.nextPacketIndex):            
+        for seq in range(rudpSecNum, self.nextSendingPacketSeqNumber):            
             Event.eventTimeoutDelete(self.__handleTimeoutData, seq)
         if self.__incrementRetries():
             ''' Decrease window size, reset packet index to the one we lost'''
             self.window = 1 if self.window - 1 < 1 else self.window - 1
-            self.nextPacketIndex = rudpSecNum
+            self.nextSendingPacketSeqNumber = rudpSecNum
             self.__emptyBuffer()
             self.retries = self.retries + 1  
     
@@ -343,22 +355,21 @@ class RudpSocketPeer:
         self.__checkClose()
         
     def __checkClose(self):
-        ''' Send FIN if all packet have been sent'''
+        ''' Send FIN if all packet have been sent - last packet in a buffer was sent and all have been ACK'ed'''
         if self.closePending is True:
-            if len(self.dataBuffer) < self.seqNumberAckNext:
+            logger.log(Level.DEBUG, str(self.nextBufferPacketSeqNumber) + ">" + str(self.nextSendingPacketSeqNumber) + " >" + str(self.nextAckSeqNumber))
+            if  self.nextBufferPacketSeqNumber == self.nextSendingPacketSeqNumber == (self.nextAckSeqNumber - 1):
                 logger.log(Level.DEBUG, "Closing peer socket:" + str(self))
                 packet = RudpPacket()
                 packet.type = RudpPacket.TYPE_FIN
-                packet.seqnum = self.dataBuffer[self.nextPacketIndex - 1].seqnum + 1
+                packet.seqnum = self.dataBuffer[self.nextSendingPacketSeqNumber - 1].seqnum + 1
                 self.rudpSocket.sendPacketControl(self.addr, packet)
                 Event.eventTimeout(RudpSocket.PARAM_TIMEOUT, self.__handleTimeoutFIN, packet.seqnum, "DATA Timeout")
-                self.state = RudpSocket.STATE_CLOSED
-                self.finished = True
-                
+                self.state = RudpSocket.STATE_CLOSED                
             else:
                 logger.log(Level.DEBUG, "Could not close peer socket yet !!!!")
     def handleACK(self, ackPacket):
-        if ackPacket.seqnum != self.seqNumberAckNext:
+        if ackPacket.seqnum != self.nextAckSeqNumber:
                 logger.log(Level.ERROR, "ACK with wrong sequence number, probably arrived too late, ignoring")
                 return
            
@@ -367,7 +378,7 @@ class RudpSocketPeer:
             logger.log(Level.DEBUG, "Handling ACK for SYN")
            
             self.state = RudpSocket.STATE_ESTABLISHED
-            self.seqNumberAckNext = 1
+            self.nextAckSeqNumber = 1
             Event.eventTimeoutDelete(self.__handleTimeoutSYN, ackPacket.seqnum - 1)            
             self.__emptyBuffer()
             self.__resetRetries()          
@@ -376,25 +387,26 @@ class RudpSocketPeer:
             logger.log(Level.DEBUG, "Handling ACK for DATA")            
             logger.log(Level.DEBUG, "ACK CORRECT")
             Event.eventTimeoutDelete(self.__handleTimeoutData, ackPacket.seqnum - 1)
-            self.seqNumberAckNext = ackPacket.seqnum + 1
+            self.nextAckSeqNumber = ackPacket.seqnum + 1
             self.window = self.window + 1
             self.__emptyBuffer()
             self.__resetRetries()            
             self.__checkClose() 
         elif self.state == RudpSocket.STATE_CLOSED:
-            ''' This must be the final ack'''
+            ''' This must be the final ACK'''
             logger.log(Level.DEBUG, "Final ACK received:" + str(self.rudpSocket))
             Event.eventTimeoutDelete(self.__handleTimeoutFIN, ackPacket.seqnum - 1)
+            self.finished = True
             self.rudpSocket._peerFinished()
             
                 
     def __emptyBuffer(self):
-        logger.log(Level.TRACE, "Sending packets, window:" +  str(self.window) + " index:" + str(self.nextPacketIndex))
-        if len(self.dataBuffer) > self.nextPacketIndex:
-            while self.window > 0 and len(self.dataBuffer) > 0 and len(self.dataBuffer) > self.nextPacketIndex:            
-                packet = self.dataBuffer[self.nextPacketIndex]
+        logger.log(Level.TRACE, "Sending packets, window:" +  str(self.window) + " index:" + str(self.nextSendingPacketSeqNumber))
+        if len(self.dataBuffer) > self.nextSendingPacketSeqNumber:
+            while self.window > 0 and len(self.dataBuffer) > 0 and len(self.dataBuffer) > self.nextSendingPacketSeqNumber:            
+                packet = self.dataBuffer[self.nextSendingPacketSeqNumber]
                 self.rudpSocket.sendPacketData(self.addr, packet)
-                self.nextPacketIndex = self.nextPacketIndex + 1
+                self.nextSendingPacketSeqNumber = self.nextSendingPacketSeqNumber + 1
                 self.window = self.window - 1
                 Event.eventTimeout(RudpSocket.PARAM_TIMEOUT, self.__handleTimeoutData, packet.seqnum, "DATA Timeout")
     

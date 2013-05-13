@@ -1,28 +1,29 @@
 '''
 Created on May 10, 2013
 
-@author: saulius
+@author: Saulius Alisauskas
 '''
 import Rudp
 import Event
 from vsftp import VsPacket
 import time
 import sys
-
-UDP_IP = "127.0.0.1"
-UDP_PORT = 5005
-WORKSPACE = "/home/saulius/rudpReceive/"
+import Logging
 
 def getCurrentMills():
     return int(round(time.time() * 1000))
 
 class Receiver:
     files = []
+    def __init__(self, host, port):
+        self.port = port
+        self.host = host
     
     def start(self):
-        self.rudpSocket = Rudp.createSocket(UDP_PORT)
+        self.rudpSocket = Rudp.createSocket(self.host, self.port)
         Rudp.registerReceiveHandler(self.rudpSocket, self.receiveHandler)
-        Event.eventLoop()
+        print "Started Receiver on  " + str(self.rudpSocket.socket.getsockname())
+        Event.eventLoop()        
         
     def receiveHandler(self, rudpSocket, senderAddress, data):
         packet = VsPacket().unpack(data)
@@ -44,7 +45,7 @@ class Receiver:
                 print "File already open !!!!"
                 sys.exit(1)
             
-            filename = WORKSPACE + packet.data
+            filename = packet.data
             print "GOT PACKET BEGIN, openning fileToWrite for writing:" + filename
             fileInfo.filename = filename
             fileInfo.filehandle = open(filename,'w')
@@ -75,10 +76,13 @@ class FileInfo:
     filename = None
     filehandle = None
     sendStarted = None
-    
-    
-Receiver().start()   
 
+if __name__ == '__main__':
+    Logging.Logger.setFile("receiver.log") # Set file for log messages
+    if len(sys.argv)  < 2:
+        print "Please provide port number, ex: python RudpReceiver.py 5000"
+    else:
+        Receiver("0.0.0.0", int(sys.argv[1])).start()   
 
 #while True:
 #    data, addr = sock.recvfrom(1024) # set buffer size

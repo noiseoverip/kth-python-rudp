@@ -10,6 +10,8 @@ import sys
 import ntpath
 import time
 from vsftp import VsPacket
+import Logging
+import re
 
 UDP_IP = "127.0.0.1"
 UDP_PORT = 0
@@ -24,7 +26,7 @@ class FileSender:
         self.packetcount = 0
         
     def send(self):
-        self.rudpSocket = Rudp.createSocket(UDP_PORT)
+        self.rudpSocket = Rudp.createSocket(UDP_IP, UDP_PORT)
         Rudp.registerEventHandler(self.rudpSocket, fileSender.handleEvent)
         
         for desination in self.addresses:
@@ -85,10 +87,23 @@ class FileSender:
         return tail or ntpath.basename(head)
             
 if __name__ == '__main__':
-    fileSender = FileSender('/home/saulius/testfileBig.ogv', [(UDP_IP, UPD_DESTINATION)])
-    fileSender.send()
-    #fileSender = FileSender('/home/saulius/testFileSmall2.txt', [(UDP_IP, UPD_DESTINATION)])
-    #fileSender.send()
+    hosts = []
+    files = []
+    for i in range(1,len(sys.argv)):        
+        result = re.search('([0-9]+(?:\.[0-9]+){3}):([0-9]+)', sys.argv[i])
+        if result is not None:
+            #print "Found host:" + result.group(1) + " port:" + result.group(2)
+            hosts.append((result.group(1), int(result.group(2))))
+        else:
+            #print "Found file " + sys.argv[i]
+            files.append(sys.argv[i])
+    
+    print "Will send files:" + str(files) + " to hosts:" + str(hosts)
+    
+    Logging.Logger.setFile("sender.log")
+    for fileToSend in files:
+        fileSender = FileSender(fileToSend, hosts)
+        fileSender.send()
     Event.eventLoop()
 
 
