@@ -73,8 +73,8 @@ class RudpSocket:
     PARAM_MAX_DATA_LENGH = 1000
     PARAM_TIMEOUT = 500 # in milliseconds
     PARAM_WINDOWS_SIZE_MAX = 3  
-    PARAM_RETIRES_MAX = 150
-    FAKE_LOSS = 5 # In scale 1-10, where 10 = 100% loss
+    PARAM_RETIRES_MAX = 50
+    FAKE_LOSS = 0 # In scale 1-5, where 5 = 50% loss
     packetloss = 0
     packetsSentData = 0
     packetsSentControl = 0

@@ -1,7 +1,7 @@
 '''
 Created on May 12, 2013
 
-@author: saulius
+@author: Saulius Alisauskas
 '''
 import struct
 
